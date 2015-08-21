@@ -1,0 +1,158 @@
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import numpy as np
+
+trials = 0
+data = []
+hops = [0 for i in range(16)]
+other_data = []
+new_data = {}
+
+def a(val):
+    return (val + 0.2)/1.2
+
+def toRdBl(val): #val between 0 and 1
+    if val <= 0.5:
+        return [a(val), a(val), a(1 - val)]
+    else:
+        return [a(val), a(1-val), a(1-val)]
+    
+
+with open("lat500.dat", 'r') as f:
+    for line in f:
+        if line[0] == "$":
+            words = line.split()
+            sender = int(words[3])
+            receiver = int(words[8])
+            num_hops = int(words[10])
+            if receiver not in new_data.keys():
+                new_data[receiver] = [num_hops, sender, 0]
+            else:
+                if new_data[receiver][1] != sender:
+                    print "uh oh pairs disagree", receiver,new_data[receiver][1], sender
+                    exit(1)
+            if new_data[receiver][0] != num_hops:
+                print "uh oh hops disagree, old ", new_data[receiver][0],\
+                    " new ", num_hops
+                exit(1)
+        if line[0] == "^":
+            words = line.split()
+            avgLatency = float(words[16])
+            num_hops = int(words[21])
+            sender = int(words[2])
+            if float(words[7]) != 0.0:
+                data.append([avgLatency,num_hops,sender])
+                hops[num_hops] += 1
+                
+        if "number of hops" in line:
+            words = line.split()
+            other_hops = int(float(words[5]))
+            other_latency = float(words[9])
+            other_data.append([other_latency,other_hops])
+#mixdata = [[data[i][0],other_data[i][1]] for i in range(len(data))]
+
+for datum in data:
+    new_data[datum[2]][2] = datum[0]
+
+trials2 = 0
+data2 = []
+hops2 = [0 for i in range(16)]
+other_data2 = []
+new_data2 = {}
+
+def b(val):
+    return val/1.1
+
+def toRdBl2(val): #val between 0 and 1   
+    if val <= 0.5:
+        return [b(val), b(val), b(1 - val)]
+    else:
+        return [b(val), b(1 - val), b(1 - val)]
+
+
+with open("lat500s.dat", 'r') as f:
+    for line in f:
+        if line[0] == "$":
+            words = line.split()
+            sender = int(words[3])
+            receiver = int(words[8])
+            num_hops = int(words[10])
+            if receiver not in new_data2.keys():
+                new_data2[receiver] = [num_hops, sender, 0]
+            else:
+                if new_data2[receiver][1] != sender:
+                    print "uh oh pairs disagree", receiver,new_data2[receiver][1],sender
+                    exit(1)
+            if new_data2[receiver][0] != num_hops:
+                print "uh oh hops disagree, old ", new_data2[receiver][0],\
+                    " new ", num_hops
+                exit(1)
+        if line[0] == "^":
+            words = line.split()
+            avgLatency = float(words[16])
+            num_hops = int(words[21])
+            sender = int(words[2])
+            if float(words[7]) != 0.0:
+                data2.append([avgLatency,num_hops,sender])
+                hops[num_hops] += 1
+
+        if "number of hops" in line:
+            words = line.split()
+            other_hops2 = int(float(words[5]))
+            other_latency2 = float(words[9])
+            other_data2.append([other_latency,other_hops])
+
+
+for datum in data2:
+    new_data2[datum[2]][2] = datum[0]
+
+#plt.figure(2)
+#plt.plot(hops, "o")
+#plt.savefig('hops500s.png')
+
+#plt.figure(3)
+#other_data.sort(key=lambda x: x[0])
+#yvals = np.arange(len(other_data))/float(len(other_data))
+#plt.axis([0,100,0.0,1.0])
+#plt.scatter(map(lambda x: x[0]*2,other_data),yvals, c=map(lambda x: toRdBl(x[1]/15.0), other_data),s=30, lw=0)
+#plt.xlabel("Average Latency (us)")
+#plt.ylabel("Relative Frequency")
+#plt.axis([0.0,0.002,0.0,1.0])                                                                    
+#plt.savefig('ores500s.png', bbox_inches='tight')
+
+#plt.figure(4)
+#mixdata.sort(key=lambda x: x[0])
+#yvals = np.arange(len(mixdata))/float(len(mixdata))
+#plt.axis([0,100,0.0,1.0])
+#plt.scatter(map(lambda x: x[0]*1000000,mixdata),yvals, c=map(lambda x: toRdBl(x[1]/15.0), other_data),s=30, lw=0)
+#plt.xlabel("average Latency (us)")
+#plt.ylabel("Relative Frequency")
+#plt.savefig('mres500s.png', bbox_inches='tight')
+
+fig = plt.figure()
+ax = fig.add_subplot(111)
+
+newer_data = []
+for key in new_data.keys():
+    if new_data[key][2] != 0:
+        newer_data.append([new_data[key][2],new_data[key][0]])
+new_data = newer_data
+new_data.sort(key=lambda x: x[0])
+yvals = np.arange(len(new_data))/float(len(new_data))
+ax.scatter(map(lambda x: x[0],new_data),yvals, new_data, c='r', lw=0, label='DOR')
+
+newer_data2 = []
+for key in new_data2.keys():
+    if new_data2[key][2] != 0:
+        newer_data2.append([new_data2[key][2],new_data2[key][0]])
+new_data2 = newer_data2
+new_data2.sort(key=lambda x: x[0])
+yvals2 = np.arange(len(new_data2))/float(len(new_data2))
+plt.axis([0,25,0.0,1.0])
+ax.scatter(map(lambda x: x[0],new_data2),yvals2, new_data2, c='b', lw=0, label='RDR')
+plt.xlabel("Average Latency (us)")
+plt.ylabel("Relative Frequency")
+plt.legend(loc=2)
+ax.figure.savefig("lat500s500.png", bbox_inches="tight")
+

@@ -1,0 +1,13 @@
+#include <stdlib.h>
+
+//only use after calling srand()
+void fisheryates(int a[], int len) {
+  int i;
+  for (i=len-1;i>0;i--) {
+    int j = rand() % (i+1);
+    int tmp = a[i];
+    a[i] = a[j];
+    a[j] = tmp;
+  }
+}
+    

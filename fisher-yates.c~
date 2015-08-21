@@ -1,0 +1,12 @@
+#include <stdlib.h>
+
+//only use after calling srand()
+void fisher-yates(int a[], int len) {
+  for (i=len-1;i>0;i--) {
+    j = rand() % i+1;
+    tmp = a[i];
+    a[i] = a[j];
+    a[j] = tmp;
+  }
+}
+    

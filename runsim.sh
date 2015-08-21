@@ -1,0 +1,19 @@
+#!/bin/bash
+
+#mv results.dat oldresults.dat
+
+seed=$(od -vAn -N4 -tu4 </dev/urandom)
+
+rm res2s.dat
+
+for i in `seq 1 500`;
+do
+    ./project --codes-config=project.conf >> res2s.dat
+done
+
+python parseLat.py
+
+xdg-open res2s.png
+xdg-open ores2s.png
+xdg-open mres2s.png
+xdg-open nres2s.png

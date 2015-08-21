@@ -1,0 +1,428 @@
+#include <string.h>
+#include <assert.h>
+#include <ross.h>
+//for randomized pairing:
+#include <time.h>
+#include <stdlib.h>
+
+#include "codes/lp-io.h"
+#include "codes/codes.h"
+#include "codes/codes_mapping.h"
+#include "codes/configuration.h"
+#include "codes/model-net.h"
+#include "codes/lp-type-lookup.h"
+#include "codes/local-storage-model.h"
+
+static int num_reqs = 0;
+static int payload_sz = 0;
+static int num_messages = 0;
+
+static int net_id = 2;
+static int num_nodes = 0;
+
+static char *group_name = "NODES";
+static char *param_group_nm = "run_params";
+static char *num_reqs_key = "num_reqs";
+static char *payload_sz_key = "payload_sz";
+
+static char *num_messages_key = "num_messages";
+
+typedef struct node_msg node_msg;
+typedef struct node_state node_state;
+
+enum node_event
+{
+  INIT,
+  PING,
+  PONG
+};
+
+struct node_state
+{
+  int msg_sent_count;
+  int msg_recvd_count;
+  tw_stime start_ts;
+  tw_stime end_ts;
+  tw_stime last_ts;
+  tw_stime total_ts;
+  int dest_dim_id[3];
+};
+
+struct node_msg
+{
+  enum node_event node_event_type;
+  tw_lpid src;
+  int incremented_flag;
+};
+
+static void node_init(node_state *ns, tw_lp *lp);
+static void node_event(node_state *ns, tw_bf *b, node_msg *m, tw_lp *lp);
+static void node_rev_event(node_state *ns, tw_bf *b, node_msg *m, tw_lp *lp);
+static void node_finalize(node_state *ns, tw_lp *lp);
+
+tw_lptype node_lp = {
+  (init_f) node_init,
+  (pre_run_f) NULL,
+  (event_f) node_event,
+  (revent_f) node_rev_event,
+  (final_f) node_finalize,
+  (map_f) codes_mapping,
+  sizeof(node_state)
+};
+
+
+static void handle_init_event(node_state *ns,
+			      tw_bf *b,
+			      node_msg *m,
+			      tw_lp *lp);
+static void handle_ping_event(node_state *ns,
+			     tw_bf *b,
+			     node_msg *m,
+			     tw_lp *lp);
+static void handle_pong_event(node_state *ns,
+			      tw_bf *b,
+			      node_msg *m,
+			      tw_lp *lp);
+static void handle_init_rev_event(node_state *ns,
+				  tw_bf *b,
+				  node_msg *m,
+				  tw_lp *lp);
+static void handle_ping_rev_event(node_state *ns,
+				  tw_bf *b,
+				  node_msg *m,
+				  tw_lp *lp);
+static void handle_pong_rev_event(node_state *ns,
+				  tw_bf *b,
+				  node_msg *m,
+				  tw_lp *lp);
+
+static void node_add_lp_type();
+
+static tw_lpid get_next_node(tw_lpid sender_id);
+static char conf_file_name[256];
+const tw_optdef app_opt[] =
+  {
+    TWOPT_GROUP("Torus network sim"),
+    TWOPT_CHAR("codes-config", conf_file_name, "name of conf file"),
+    TWOPT_END()
+  };
+
+extern void fisheryates(int *a, int len);
+extern int arc4random_uniform(int max);
+
+int *node_mappings;
+void generate_node_mappings();
+void free_node_mappings();
+
+int find_node_distance(int src[3], int dst[3]);
+
+static tw_stime ns_to_s(tw_stime ns)
+{
+  return(ns / (1000.0 * 1000.0 * 1000.0));
+}
+
+static tw_stime s_to_ns(tw_stime ns)
+{
+  return(ns * (1000.0 * 1000.0 * 1000.0));
+}
+
+int main(int argc, char **argv) {
+  int nprocs;
+  int rank;
+  int num_nets, *net_ids;
+  int i;
+
+  //for later random pairing:
+  srand(time(NULL));
+  
+  g_tw_ts_end = s_to_ns(60*60*24*365);
+  tw_opt_add(app_opt);
+  tw_init(&argc, &argv);
+
+  if (!conf_file_name[0]) {
+    fprintf(stderr, "Expected \"codes-config\" option, please see --help.\n");
+    MPI_Finalize();
+    return 1;
+  }
+
+  MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+  MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
+  
+  if (configuration_load(conf_file_name, MPI_COMM_WORLD, &config)) {
+    fprintf(stderr, "Error loading config file %s.\n", conf_file_name);
+    MPI_Finalize();
+    return 1;
+  }
+
+  model_net_register();
+  node_add_lp_type();
+  codes_mapping_setup();
+  net_ids = model_net_configure(&num_nets);
+  assert(num_nets==1);
+  net_id = *net_ids;
+  free(net_ids);
+  if(net_id != TORUS) {
+    printf("\n This is written to simulate torus networks.");
+    MPI_Finalize();
+    return 0;
+  }
+  num_nodes = codes_mapping_get_lp_count(group_name, 0, "node", NULL, 1);
+  configuration_get_value_int(&config, param_group_nm, num_reqs_key, NULL, &num_reqs);
+  configuration_get_value_int(&config, param_group_nm, payload_sz_key, NULL, &payload_sz);
+  configuration_get_value_int(&config, param_group_nm, num_messages_key, NULL, &num_messages);
+  
+  tw_run();
+  
+  model_net_report_stats(net_id);
+  
+  tw_end();
+  free_node_mappings();
+
+  return 0;
+}
+/*
+void generate_node_mappings() {
+  int i, j;
+  int num_reps;
+  int off_node;
+  char is_odd;
+  
+  num_reps = codes_mapping_get_group_reps("NODES");
+  printf("num_reps is %d\n", num_reps);
+  int *init_mappings = (int *)malloc(sizeof(int)*num_reps);
+  node_mappings = (int *)malloc(sizeof(int)*num_reps);
+
+  for (i=0; i<num_reps; i++) init_mappings[i] = i;
+  fisheryates(init_mappings, num_reps);
+  //Now we turn off nodes until we have the correct number.
+  j = num_reps - num_active;
+  printf("j is %d\n",j);
+  if (j < 0) {
+    fprintf(stderr, "num_active must be less than or equal to node repetitions.\n");
+    exit(1);
+  }
+  if (j % 2) {
+    fprintf(stderr, "num_active must be even since nodes communicate in pairs.\n");
+    exit(1);
+  }
+  while (j>0) {
+    off_node = arc4random_uniform(num_reps);
+    if (init_mappings[off_node] > -1) {
+      is_odd = off_node % 2;
+      if (is_odd) init_mappings[off_node - 1] = -1;
+      else init_mappings[off_node + 1] = -1;
+      init_mappings[off_node] = -1;
+      j-=2;
+    }
+  }
+  for (i=0;i<num_reps; i++) node_mappings[i] = -1;
+  for (i=0; i<num_reps; i+=2) {
+    if (init_mappings[i] >= 0) {
+      node_mappings[init_mappings[i]] = init_mappings[i+1];
+      //node_mappings[init_mappings[i+1]] = init_mappings[i];
+    }
+  }
+  DEBUG
+  for (i=0;i<num_reps; i++) printf("%d ",init_mappings[i]);
+  printf("\n\n");
+  for (i=0;i<num_reps; i++) printf("%d ",node_mappings[i]);
+  
+  free(init_mappings);
+} 
+*/  
+
+void free_node_mappings() {
+  free(node_mappings);
+}
+
+const tw_lptype *node_get_lp_type() {
+  return(&node_lp);
+}
+
+static void node_add_lp_type() {
+  lp_type_register("node", node_get_lp_type());
+}
+
+static void node_init(node_state *ns, tw_lp *lp) {
+
+  tw_event *e;
+  node_msg *m;
+  tw_stime init_time;
+
+  memset(ns, 0, sizeof(*ns));
+
+  init_time = g_tw_lookahead + tw_rand_unif(lp->rng);
+  e = codes_event_new(lp->gid, init_time, lp);
+
+  m = tw_event_data(e);
+  m->node_event_type = INIT;
+  tw_event_send(e);
+
+  return;
+}
+
+static void node_event(node_state *ns, tw_bf *b, node_msg *m, tw_lp *lp) {
+  switch (m->node_event_type) {
+  case INIT:
+    handle_init_event(ns, b, m, lp);
+    break;
+  case PING:
+    handle_ping_event(ns, b, m, lp);
+    break;
+  case PONG:
+    handle_pong_event(ns, b, m, lp);
+    break;
+  default:
+    printf("\n Invalid message type %d", m->node_event_type);
+    assert(0);
+    break;
+  }
+}
+
+static void node_rev_event(node_state *ns, tw_bf *b, node_msg *m, tw_lp *lp) {
+  switch (m->node_event_type) {
+  case INIT:
+    handle_init_rev_event(ns, b, m, lp);
+    break;
+  case PING:
+    handle_ping_rev_event(ns, b, m, lp);
+    break;
+  case PONG:
+    handle_pong_rev_event(ns, b, m, lp);
+  default:
+    assert(0);
+    break;
+  }
+  return;
+}
+
+int find_node_distance(int src[3], int dst[3]) { //hard-coded
+  int i, dist;
+  int dists[3];
+  for (i=0;i<3;i++) {
+    dist = src[i] - dst[i];
+    if (dist < 0) dist = -dist;
+    if(dist <= 5) dists[i] = dist;
+    else dists[i] = 10 - dist;
+  }
+  return dists[0] + dists[1] + dists[2];
+}
+
+static void node_finalize(node_state *ns, tw_lp *lp) {
+  int node_dim_id[3];
+  int dim_lens[3] = {10, 10, 10};
+  model_net_torus_get_dim_id(codes_mapping_get_lp_relative_id(lp->gid, 0, 1), 3, dim_lens, node_dim_id); //hard-coded
+  int dist = find_node_distance(node_dim_id, ns->dest_dim_id);
+  unsigned long long node = codes_mapping_get_lp_relative_id(lp->gid,0,1);
+  if (node == 1)
+  printf("^ node %llu received %d bytes in %lf microseconds, %lf MiB/s sent_count %d recvd_count %d avgLatency %lf sent to a server %d hops away \n",
+	 node,
+	 payload_sz*ns->msg_recvd_count,
+	 (ns->end_ts-ns->start_ts)/1000.0,
+	 ((double)(payload_sz*num_reqs)/(double)(1024*1024)/ns_to_s(ns->end_ts-ns->start_ts)),
+	 ns->msg_sent_count,
+	 ns->msg_recvd_count,
+	 ns->total_ts/((double)ns->msg_sent_count/10.0)/1000.0, 
+	 dist);
+  return;
+}
+
+tw_lpid get_next_node(tw_lpid sender_id) {
+  tw_lpid rtn_id;
+  char grp_name[MAX_NAME_LENGTH], lp_type_name[MAX_NAME_LENGTH],
+    annotation[MAX_NAME_LENGTH];
+  int lp_type_id, grp_id, grp_rep_id, offset; //num_reps;
+  codes_mapping_get_lp_info(sender_id, grp_name, &grp_id, lp_type_name,
+			    &lp_type_id, annotation, &grp_rep_id, &offset);
+  //  num_reps = codes_mapping_get_group_reps(grp_name);
+  //We match up node pairs randomly.
+  //  while((dest_rep_id = rand() % num_reps) == grp_rep_id);
+  if (grp_rep_id != 1) rtn_id = (tw_lpid) -1;
+  else codes_mapping_get_lp_id(grp_name, lp_type_name, NULL, 1, 2/*the neighbor*/, 0, &rtn_id);
+  return rtn_id;
+}
+
+static void handle_init_event(node_state *ns, tw_bf *b, node_msg *m, tw_lp *lp) {
+  int dest_id;
+  node_msg m_remote;
+  int i;
+
+  dest_id = get_next_node(lp->gid);
+  
+  m_remote.node_event_type = PING;
+  m_remote.src = lp->gid;
+  ns->start_ts = tw_now(lp);
+  ns->last_ts = ns->start_ts;
+  if (dest_id == -1) return;
+  int dim_lens[3] = {10, 10, 10};
+  model_net_torus_get_dim_id(dest_id, 3, dim_lens, ns->dest_dim_id); //dim length hard-coded for now
+  for (i=0; i<num_messages; i++) {
+    model_net_event(net_id, "ping", dest_id, payload_sz, 0.0, sizeof(node_msg),
+		    (const void*)&m_remote, 0, NULL, lp);
+    ns->msg_sent_count++;
+  }
+}
+
+static void handle_pong_event(node_state *ns, tw_bf *b, node_msg *m, tw_lp *lp) {
+  int i;
+
+  if(ns->msg_sent_count < num_reqs*num_messages) {
+    node_msg m_remote;
+    
+    m_remote.node_event_type = PING;
+    m_remote.src = lp->gid;
+
+    tw_stime tmp = tw_now(lp);
+    ns->total_ts += tmp - ns->last_ts;
+    ns->last_ts = tmp;
+    
+    for (i=0; i<num_messages; i++) {
+      model_net_event(net_id, "ping", m->src, payload_sz, 0.0, sizeof(node_msg),
+		      (const void *)&m_remote, 0, NULL, lp);
+      ns->msg_sent_count++;
+    }
+    m->incremented_flag = 1;
+  }
+  else {
+    m->incremented_flag = 0;
+    ns->end_ts = tw_now(lp);
+  }
+  return;
+}
+
+static void handle_ping_event(node_state *ns, tw_bf *b, node_msg *m, tw_lp *lp) {
+  node_msg m_remote;
+  
+  m_remote.node_event_type = PONG;
+  m_remote.src = lp->gid;
+
+  ns->msg_recvd_count++;
+
+  if (!(ns->msg_recvd_count % num_messages)) { 
+  model_net_event(net_id, "pong", m->src, payload_sz, 0.0, sizeof(node_msg),
+		  (const void*)&m_remote, 0, NULL, lp);
+  }
+  return;
+}
+
+
+
+static void handle_ping_rev_event(node_state *ns, tw_bf *b, node_msg *m, tw_lp *lp) {
+  ns->msg_recvd_count--;
+  model_net_event_rc(net_id, lp, payload_sz);
+  return; 
+}
+
+static void handle_init_rev_event(node_state *ns, tw_bf *b, node_msg *m, tw_lp *lp) {
+  ns->msg_sent_count--;
+  model_net_event_rc(net_id, lp, payload_sz);
+  return;
+}
+
+static void handle_pong_rev_event(node_state *ns, tw_bf *b, node_msg *m, tw_lp *lp) {
+  if(m->incremented_flag) {
+    model_net_event_rc(net_id, lp, payload_sz);
+    ns->msg_sent_count--;
+  }
+  return;
+}
